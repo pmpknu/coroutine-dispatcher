@@ -77,6 +77,14 @@ struct task {
    * Защищает поля структуры от неупорядоченного доступа.
    */
   struct spinlock lock;
+
+  /**
+   * Статистика времени в различных состояниях.
+   */
+  struct timespec last_state_change; // Время последнего изменения состояния
+  uint64_t time_running;             // Всего времени в состоянии `RUNNING`
+  uint64_t time_runnable;            // Всего времени в состоянии `RUNNABLE`
+  uint64_t time_blocked;             // Всего времени в состоянии `BLOCKED`
 };
 
 /**
@@ -123,6 +131,46 @@ static kthread_id_t kthread_ids[SCHED_WORKERS_COUNT];
 static struct worker workers[SCHED_WORKERS_COUNT];
 
 /**
+ * Получить текущее время в наносекундах.
+ */
+uint64_t get_time_ns() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+/**
+ * Преобразовать время в `struct timespec` в наносекунды.
+ */
+uint64_t convert_time_to_ns(struct timespec* time) {
+    return (uint64_t)time->tv_sec * 1000000000ULL + (uint64_t)time->tv_nsec;
+}
+
+/**
+ * Обновить параметры времени для задачи.
+ */
+void update_task_time(struct task* task) {
+    uint64_t now = get_time_ns();
+    uint64_t delta = now - convert_time_to_ns(&task->last_state_change);
+
+    switch (task->state) {
+        case UTHREAD_RUNNING:
+            task->time_running += delta;
+            break;
+        case UTHREAD_RUNNABLE:
+            task->time_runnable += delta;
+            break;
+        case UTHREAD_BLOCKED:
+            task->time_blocked += delta;
+            break;
+        default:
+            break;
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &task->last_state_change);
+}
+
+/**
  * Установить задачу в пустое состояние.
  */
 void sched_task_init(struct task* task) {
@@ -159,6 +207,7 @@ void sched_init() {
  * в контекст планировщика.
  */
 void sched_switch_to_scheduler(struct task* task) {
+  update_task_time(task);
   struct uthread* sched = &task->worker->sched_thread;
   task->worker = NULL;
   uthread_switch(task->thread, sched);
@@ -170,6 +219,7 @@ void sched_switch_to_scheduler(struct task* task) {
  * невынужденного возвращения в планировщик.
  */
 void sched_switch_to(struct worker* worker, struct task* task) {
+  update_task_time(task);
   assert(task->thread != &worker->sched_thread);
 
   task->state = UTHREAD_RUNNING;
@@ -262,6 +312,7 @@ struct task* sched_acquire_next() {
 }
 
 void sched_release(struct task* task) {
+  update_task_time(task);
   task->worker = NULL;
   if (task->state == UTHREAD_FINISHED) {
     // Отправляем задачу на кладбище, а могли бы
@@ -364,13 +415,27 @@ void sched_print_statistics() {
 
   size_t tasks_count = 0;
   size_t steps_count = 0;
+  uint64_t total_time_running = 0;
+  uint64_t total_time_runnable = 0;
+  uint64_t total_time_blocked = 0;
+
   for (size_t i = 0; i < SCHED_WORKERS_COUNT; ++i) {
     struct worker* worker = &workers[i];
     tasks_count += worker->statistics.finished;
     steps_count += worker->statistics.steps;
   }
 
+  for (size_t i = 0; i < SCHED_THREADS_LIMIT; ++i) {
+    struct task* task = &tasks[i];
+    total_time_running += task->time_running;
+    total_time_runnable += task->time_runnable;
+    total_time_blocked += task->time_blocked;
+  }
+
   printf("|- tasks executed %zu\n", tasks_count);
+  printf("|- total time RUNNING:   %lu ns\n", total_time_running);
+  printf("|- total time RUNNABLE:  %lu ns\n", total_time_runnable);
+  printf("|- total time BLOCKED:   %lu ns\n", total_time_blocked);
   printf("|- steps done     %zu\n", steps_count);
 
   for (size_t i = 0; i < SCHED_WORKERS_COUNT; ++i) {
