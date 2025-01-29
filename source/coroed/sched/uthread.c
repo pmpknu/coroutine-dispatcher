@@ -25,7 +25,7 @@
 /**
  * Сохраняемые callee-saved регистры.
  */
-struct [[gnu::packed]] switch_frame {
+struct switch_frame {
   uint64_t r15;
   uint64_t r14;
   uint64_t r13;
@@ -33,7 +33,7 @@ struct [[gnu::packed]] switch_frame {
   uint64_t rbp;
   uint64_t rbx;
   uint64_t rip;
-};
+} __attribute__((packed));
 
 struct switch_frame* uthread_frame(struct uthread* thread) {
   return thread->context;
