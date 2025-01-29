@@ -236,6 +236,7 @@ struct task* sched_acquire_next() {
     for (size_t i = 0; i < SCHED_THREADS_LIMIT; ++i) {
       struct task* task = &tasks[next_task_index];
       if (!spinlock_try_lock(&task->lock)) {
+        next_task_index = (next_task_index + 1) % SCHED_THREADS_LIMIT;
         continue;
       }
 
