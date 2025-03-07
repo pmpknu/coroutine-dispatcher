@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/queue.h>
 
 #include "coroed/api/task.h"
 #include "coroed/core/relax.h"
@@ -85,6 +86,8 @@ struct task {
   uint64_t time_running;             // Всего времени в состоянии `RUNNING`
   uint64_t time_runnable;            // Всего времени в состоянии `RUNNABLE`
   uint64_t time_blocked;             // Всего времени в состоянии `BLOCKED`
+
+  LIST_ENTRY(task) entries;  // Узел двусвязного списка
 };
 
 /**
@@ -129,6 +132,9 @@ static struct task tasks[SCHED_THREADS_LIMIT];  // Список всех зад�
 
 static kthread_id_t kthread_ids[SCHED_WORKERS_COUNT];
 static struct worker workers[SCHED_WORKERS_COUNT];
+
+static LIST_HEAD(blocked_task_list, task) blocked_tasks = LIST_HEAD_INITIALIZER(blocked_tasks);
+static struct spinlock blocked_lock;
 
 /**
  * Получить текущее время в наносекундах.
@@ -193,6 +199,7 @@ void sched_worker_init(struct worker* worker, size_t index) {
 
 void sched_init() {
   spinlock_init(&tasks_lock);
+  spinlock_init(&blocked_lock);
   for (size_t i = 0; i < SCHED_THREADS_LIMIT; ++i) {
     sched_task_init(&tasks[i]);
   }
@@ -256,6 +263,9 @@ int sched_loop(void* argument) {
   kthread_ids[worker->index] = kthread_id();
 
   for (;;) {
+    // Проверяем заблокированные задачи
+    sched_check_blocked();
+    
     struct task* task = sched_acquire_next();
     if (task == NULL) {
       break;
@@ -321,10 +331,27 @@ void sched_release(struct task* task) {
     task->state = UTHREAD_ZOMBIE;
   } else if (task->state == UTHREAD_RUNNING) {
     task->state = UTHREAD_RUNNABLE;
-  } else /* if (task->state == UTHREAD_BLOCKED) */ {
-    assert(false && "Not implemented");
+  } else if (task->state == UTHREAD_BLOCKED) {
+    spinlock_lock(&blocked_lock);
+    LIST_INSERT_HEAD(&blocked_tasks, task, entries);
+    spinlock_unlock(&blocked_lock);
   }
+
   spinlock_unlock(&task->lock);
+}
+
+/**
+ * Перевести задачу в состояние готовности.
+ */
+void sched_unblock(struct task* task) {
+  spinlock_lock(&blocked_lock);
+
+  if (task->state == UTHREAD_BLOCKED) {
+    LIST_REMOVE(task, entries);
+    task->state = UTHREAD_RUNNABLE;
+  }
+
+  spinlock_unlock(&blocked_lock);
 }
 
 /**
@@ -455,4 +482,24 @@ void sched_destroy() {
     }
     spinlock_unlock(&task->lock);
   }
+}
+
+void sched_block(struct task* task) {
+    update_task_time(task);
+    
+    spinlock_lock(&blocked_lock);
+    task->state = UTHREAD_BLOCKED;
+    LIST_INSERT_HEAD(&blocked_tasks, task, entries);
+    spinlock_unlock(&blocked_lock);
+
+    task_yield(task);
+}
+
+void sched_check_blocked() {
+    spinlock_lock(&blocked_lock);
+    struct task *task;
+    LIST_FOREACH(task, &blocked_tasks, entries) {
+        // ???
+    }
+    spinlock_unlock(&blocked_lock);
 }

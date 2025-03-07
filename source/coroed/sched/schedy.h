@@ -16,3 +16,9 @@ void sched_wait();
 void sched_print_statistics();
 
 void sched_destroy();
+
+void sched_block(struct task* task);
+
+void sched_check_blocked();
+
+void sched_unblock(struct task* task);
