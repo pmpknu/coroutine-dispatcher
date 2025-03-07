@@ -8,6 +8,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+//#include <linux/time.h> // uncomment this line to prevent linter error
+                          //              of `CLOCK_MONOTONIC undefined`
+                          //                   (but file won't compile)
 #include <sys/queue.h>
 
 #include "coroed/api/task.h"
@@ -499,7 +502,11 @@ void sched_check_blocked() {
     spinlock_lock(&blocked_lock);
     struct task *task;
     LIST_FOREACH(task, &blocked_tasks, entries) {
+        if (!task) continue;
+        if (task->state == UTHREAD_BLOCKED) {
         // ???
+            sched_unblock(task);
+        }
     }
     spinlock_unlock(&blocked_lock);
 }
