@@ -282,11 +282,6 @@ int sched_loop(void* argument) {
     }
 
     sched_release(task);
-
-    // Hint: где-то здесь можно было бы опросить
-    //       механизмы для неблокирующего ввода-вывода
-    //       и перевести удовлетворенные BLOCKED
-    //       потоки в RUNNABLE состояние.
   }
 
   return 0;
@@ -501,12 +496,18 @@ void sched_block(struct task* task) {
 void sched_check_blocked() {
     spinlock_lock(&blocked_lock);
     struct task *task;
-    LIST_FOREACH(task, &blocked_tasks, entries) {
+    struct task *next_task;
+
+    for (task = LIST_FIRST(&blocked_tasks); task != NULL; task = next_task) {
+        next_task = LIST_NEXT(task, entries);
         if (!task) continue;
+
+        spinlock_lock(&task->lock);
+
         if (task->state == UTHREAD_BLOCKED) {
-        // ???
             sched_unblock(task);
         }
+        spinlock_unlock(&task->lock);
     }
     spinlock_unlock(&blocked_lock);
 }
