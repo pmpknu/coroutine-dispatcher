@@ -8,16 +8,22 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-//#include <linux/time.h> // uncomment this line to prevent linter error
-                          //              of `CLOCK_MONOTONIC undefined`
-                          //                   (but file won't compile)
+
 #include <sys/queue.h>
+#include <sys/epoll.h>
+
+#include <errno.h>
 
 #include "coroed/api/task.h"
 #include "coroed/core/relax.h"
 #include "coroed/core/spinlock.h"
 #include "kthread.h"
 #include "uthread.h"
+
+// Add this definition if CLOCK_MONOTONIC is not defined
+#ifndef CLOCK_MONOTONIC
+#define CLOCK_MONOTONIC 1
+#endif
 
 enum {
   /**
@@ -37,6 +43,17 @@ enum {
    * конкуренции на спинлоках файберов.
    */
   SCHED_NEXT_MAX_ATTEMPTS = (size_t)(16),
+
+  /**
+   * Максимальное количество событий, которые могут быть
+   * обработаны в одном цикле epoll.
+   */
+  MAX_EPOLL_EVENTS = (size_t)(64),
+
+  /**
+   * Максимальное время ожидания событий в миллисекундах.
+   */
+  MAX_EPOLL_TIMEOUT = (int)(1000),
 };
 
 /**
@@ -139,6 +156,49 @@ static struct worker workers[SCHED_WORKERS_COUNT];
 static LIST_HEAD(blocked_task_list, task) blocked_tasks = LIST_HEAD_INITIALIZER(blocked_tasks);
 static struct spinlock blocked_lock;
 
+// Add epoll thread declaration
+static struct kthread epoll_thread;
+
+// Add epoll file descriptor
+static int epoll_fd = -1;
+
+/**
+ * Epoll thread function that monitors file descriptors for I/O events.
+ */
+int epoll_loop(void* argument) {
+    (void)argument;
+    
+    struct epoll_event events[MAX_EPOLL_EVENTS];
+    
+    while (1) {
+        int nfds = epoll_wait(epoll_fd, events, MAX_EPOLL_EVENTS, MAX_EPOLL_TIMEOUT);
+        if (nfds == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            perror("epoll_wait");
+            break;
+        }
+        
+        for (int i = 0; i < nfds; i++) {
+            struct task* task = (struct task*)events[i].data.ptr;
+            if (task) {
+                spinlock_lock(&task->lock);
+                if (task->state == UTHREAD_BLOCKED) {
+                    task->state = UTHREAD_RUNNABLE;
+
+                    spinlock_lock(&blocked_lock);
+                    LIST_REMOVE(task, entries);
+                    spinlock_unlock(&blocked_lock);
+                }
+                spinlock_unlock(&task->lock);
+            }
+        }
+    }
+    
+    return 0;
+}
+
 /**
  * Получить текущее время в наносекундах.
  */
@@ -209,6 +269,12 @@ void sched_init() {
   for (size_t i = 0; i < SCHED_WORKERS_COUNT; ++i) {
     kthread_ids[i] = 0;
     sched_worker_init(&workers[i], i);
+  }
+
+  epoll_fd = epoll_create1(0);
+  if (epoll_fd == -1) {
+    perror("epoll_create1");
+    exit(EXIT_FAILURE);
   }
 }
 
@@ -425,6 +491,9 @@ void sched_start() {
     enum kthread_status status = kthread_create(&worker->kthread, sched_loop, worker);
     assert(status == KTHREAD_SUCCESS);
   }
+
+  enum kthread_status epoll_status = kthread_create(&epoll_thread, epoll_loop, NULL);
+  assert(epoll_status == KTHREAD_SUCCESS);
 }
 
 void sched_wait() {
@@ -480,6 +549,11 @@ void sched_destroy() {
     }
     spinlock_unlock(&task->lock);
   }
+
+  if (epoll_fd != -1) {
+    close(epoll_fd);
+    epoll_fd = -1;
+  }
 }
 
 void sched_block(struct task* task) {
@@ -491,6 +565,31 @@ void sched_block(struct task* task) {
     spinlock_unlock(&blocked_lock);
 
     task_yield(task);
+}
+
+/**
+ * Блокирует задачу на ожидание событий на файловом дескрипторе.
+ */
+void sched_block_on_fd(struct task* task, int fd, uint32_t events) {
+    update_task_time(task);
+
+    struct epoll_event ev;
+    ev.events = events;
+    ev.data.ptr = task;
+
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) == -1) {
+        perror("epoll_ctl: add");
+        return;
+    }
+
+     spinlock_lock(&blocked_lock);
+    task->state = UTHREAD_BLOCKED;
+    LIST_INSERT_HEAD(&blocked_tasks, task, entries);
+    spinlock_unlock(&blocked_lock);
+
+    task_yield(task);
+
+    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
 }
 
 void sched_check_blocked() {
