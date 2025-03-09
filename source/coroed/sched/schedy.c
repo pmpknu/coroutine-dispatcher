@@ -13,6 +13,8 @@
 #include <sys/epoll.h>
 
 #include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "coroed/api/task.h"
 #include "coroed/core/relax.h"
@@ -80,6 +82,12 @@ uint64_t convert_time_to_ns(struct timespec* time);
 void sched_enqueue_task(struct task* task);
 void sched_dequeue_task(struct task* task);
 void sched_adjust_priority(struct task* task);
+
+// Add these global variables for statistics
+static int stats_fd = -1;
+static const char* STATS_FILENAME = "log/scheduler_stats.log";
+static uint64_t last_stats_time = 0;
+static const uint64_t STATS_INTERVAL_NS = 1000000000ULL; // 1 seconds
 
 /**
  * Задача, выполняющаяся на планировщике.
@@ -213,6 +221,9 @@ int epoll_loop(void* argument) {
     struct epoll_event events[MAX_EPOLL_EVENTS];
     
     while (1) {
+        // Print statistics periodically
+        sched_print_statistics();
+ 
         int nfds = epoll_wait(epoll_fd, events, MAX_EPOLL_EVENTS, MAX_EPOLL_TIMEOUT);
         if (nfds == -1) {
             if (errno == EINTR) {
@@ -335,6 +346,14 @@ void sched_init() {
     spinlock_init(&queue_locks[i]);
     LIST_INIT(&ready_queues[i]);
   }
+
+  // Open statistics file with non-blocking flags
+  stats_fd = open(STATS_FILENAME, O_WRONLY | O_CREAT | O_APPEND | O_NONBLOCK, 0644);
+  if (stats_fd == -1) {
+    perror("Failed to open statistics file");
+  }
+  
+  last_stats_time = get_time_ns();
 }
 
 /**
@@ -604,9 +623,31 @@ void sched_wait() {
   }
 }
 
-void sched_print_statistics() {
-  printf("\nsched statistics\n");
+char* print_state(int state) {
+  switch (state) {
+    case UTHREAD_RUNNABLE: return "RUNNABLE";
+    case UTHREAD_RUNNING: return "RUNNING";
+    case UTHREAD_FINISHED: return "FINISHED";
+    case UTHREAD_ZOMBIE: return "ZOMBIE";
+    case UTHREAD_BLOCKED: return "BLOCKED";
+    default: return "UNKNOWN";
+  }
+}
 
+// Modified statistics function to use non-blocking I/O
+void sched_print_statistics() {
+  if (stats_fd == -1) return;
+
+  uint64_t now = get_time_ns();
+
+  // Only print statistics periodically
+  if (now - last_stats_time < STATS_INTERVAL_NS) {
+    return;
+  }
+
+  last_stats_time = now;
+
+  // Collect statistics
   size_t tasks_count = 0;
   size_t steps_count = 0;
   uint64_t total_time_running = 0;
@@ -626,18 +667,35 @@ void sched_print_statistics() {
     total_time_blocked += task->time_blocked;
   }
 
-  printf("|- tasks executed %zu\n", tasks_count);
-  printf("|- total time RUNNING:   %lu ns\n", total_time_running);
-  printf("|- total time RUNNABLE:  %lu ns\n", total_time_runnable);
-  printf("|- total time BLOCKED:   %lu ns\n", total_time_blocked);
-  printf("|- steps done     %zu\n", steps_count);
+  // Format statistics into a buffer
+  char buffer[4096];
+  int len = snprintf(buffer, sizeof(buffer),
+    "\n--- Scheduler Statistics at %lu ns ---\n"
+    "Tasks executed: %zu\n"
+    "Total time RUNNING: %lu ns\n"
+    "Total time RUNNABLE: %lu ns\n"
+    "Total time BLOCKED: %lu ns\n"
+    "Steps done: %zu\n",
+    now, tasks_count, total_time_running, total_time_runnable, 
+    total_time_blocked, steps_count);
 
-  for (size_t i = 0; i < SCHED_WORKERS_COUNT; ++i) {
+  // Add worker statistics
+  for (size_t i = 0; i < SCHED_WORKERS_COUNT && len < (int)sizeof(buffer) - 100; ++i) {
     struct worker* worker = &workers[i];
-    printf("|- worker %zu %zu\n", i, kthread_ids[i]);
-    printf("   |- steps     %zu\n", worker->statistics.steps);
-    printf("   |- finished  %zu\n", worker->statistics.finished);
+    len += snprintf(buffer + len, sizeof(buffer) - len,
+      "Worker %zu (ID: %zu): Steps: %zu, Finished: %zu, State: %s\n",
+      i, kthread_ids[i], worker->statistics.steps, worker->statistics.finished, print_state(worker->running_task->state));
   }
+
+  // Add priority queue statistics
+  len += snprintf(buffer + len, sizeof(buffer) - len, 
+    "Priority queue sizes: High: %d, Normal: %d, Low: %d\n",
+    LIST_EMPTY(&ready_queues[PRIORITY_HIGH]) ? 0 : 1,
+    LIST_EMPTY(&ready_queues[PRIORITY_NORMAL]) ? 0 : 1,
+    LIST_EMPTY(&ready_queues[PRIORITY_LOW]) ? 0 : 1);
+
+  // Write to file using non-blocking I/O
+  write(stats_fd, buffer, len);
 }
 
 void sched_destroy() {
@@ -653,6 +711,11 @@ void sched_destroy() {
   if (epoll_fd != -1) {
     close(epoll_fd);
     epoll_fd = -1;
+  }
+
+  if (stats_fd != -1) {
+    close(stats_fd);
+    stats_fd = -1;
   }
 }
 
