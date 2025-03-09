@@ -686,16 +686,28 @@ void sched_print_statistics() {
   // Add worker statistics
   for (size_t i = 0; i < SCHED_WORKERS_COUNT && len < (int)sizeof(buffer) - 100; ++i) {
     struct worker* worker = &workers[i];
-    len += snprintf(
-        buffer + len,
-        sizeof(buffer) - len,
-        "Worker %zu (ID: %zu): Steps: %zu, Finished: %zu, State: %s\n",
-        i,
-        kthread_ids[i],
-        worker->statistics.steps,
-        worker->statistics.finished,
-        print_state(worker->running_task->state)
-    );
+    if (worker->running_task != NULL) {
+      len += snprintf(
+          buffer + len,
+          sizeof(buffer) - len,
+          "Worker %zu (ID: %zu): Steps: %zu, Finished: %zu, State: %s\n",
+          i,
+          kthread_ids[i],
+          worker->statistics.steps,
+          worker->statistics.finished,
+          print_state(worker->running_task->state)
+      );
+    } else {
+      len += snprintf(
+          buffer + len,
+          sizeof(buffer) - len,
+          "Worker %zu (ID: %zu): Steps: %zu, Finished: %zu, State: IDLE\n",
+          i,
+          kthread_ids[i],
+          worker->statistics.steps,
+          worker->statistics.finished
+      );
+    }
   }
 
   // Add priority queue statistics
