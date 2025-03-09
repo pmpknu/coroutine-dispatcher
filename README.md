@@ -29,6 +29,8 @@ Run precommit checks locally.
 
 ## Reference
 
+- [Report for lab](./report.md)
+
 - [Stackless Coroutines in C by @vityaman](https://github.com/vityaman-edu/c-coroutines)
 
 - [Stepik OS Course by CSCenter](https://github.com/cscenter/OS_online_course)
