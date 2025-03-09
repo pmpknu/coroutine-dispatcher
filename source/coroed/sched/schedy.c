@@ -1,19 +1,17 @@
 #include "schedy.h"
 
 #include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <sched.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
-
-#include <sys/queue.h>
 #include <sys/epoll.h>
-
-#include <errno.h>
-#include <fcntl.h>
+#include <sys/queue.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "coroed/api/task.h"
@@ -59,12 +57,7 @@ enum {
 };
 
 // Define task priority enum before using it
-enum task_priority {
-  PRIORITY_HIGH = 0,
-  PRIORITY_NORMAL = 1,
-  PRIORITY_LOW = 2,
-  PRIORITY_COUNT = 3
-};
+enum task_priority { PRIORITY_HIGH = 0, PRIORITY_NORMAL = 1, PRIORITY_LOW = 2, PRIORITY_COUNT = 3 };
 
 struct task;
 struct worker;
@@ -87,7 +80,7 @@ void sched_adjust_priority(struct task* task);
 static int stats_fd = -1;
 static const char* STATS_FILENAME = "log/scheduler_stats.log";
 static uint64_t last_stats_time = 0;
-static const uint64_t STATS_INTERVAL_NS = 1000000000ULL; // 1 seconds
+static const uint64_t STATS_INTERVAL_NS = 1000000000ULL;  // 1 seconds
 
 /**
  * Задача, выполняющаяся на планировщике.
@@ -131,19 +124,19 @@ struct task {
   /**
    * Статистика времени в различных состояниях.
    */
-  struct timespec last_state_change; // Время последнего изменения состояния
-  uint64_t time_running;             // Всего времени в состоянии `RUNNING`
-  uint64_t time_runnable;            // Всего времени в состоянии `RUNNABLE`
-  uint64_t time_blocked;             // Всего времени в состоянии `BLOCKED`
+  struct timespec last_state_change;  // Время последнего изменения состояния
+  uint64_t time_running;              // Всего времени в состоянии `RUNNING`
+  uint64_t time_runnable;             // Всего времени в состоянии `RUNNABLE`
+  uint64_t time_blocked;              // Всего времени в состоянии `BLOCKED`
 
   LIST_ENTRY(task) entries;  // Узел двусвязного списка
 
   // Приоритет задачи
   enum task_priority priority;
-  
+
   // Время, когда задача начала свою текущую кванту
   uint64_t quantum_start;
-  
+
   // Количество раз, когда задача была прервана
   uint32_t preemption_count;
 };
@@ -185,7 +178,6 @@ static struct spinlock tasks_lock;              // Защищает список
 static size_t next_task_index = 0;              // Для планирования round-robin
 static struct task tasks[SCHED_THREADS_LIMIT];  // Список всех задач
 
-
 static kthread_id_t kthread_ids[SCHED_WORKERS_COUNT];
 static struct worker workers[SCHED_WORKERS_COUNT];
 
@@ -197,9 +189,9 @@ static int epoll_fd = -1;
 
 // Приоритетные очереди для разных приоритетов задач
 static LIST_HEAD(task_queue, task) ready_queues[PRIORITY_COUNT] = {
-  LIST_HEAD_INITIALIZER(ready_queues[0]),
-  LIST_HEAD_INITIALIZER(ready_queues[1]),
-  LIST_HEAD_INITIALIZER(ready_queues[2])
+    LIST_HEAD_INITIALIZER(ready_queues[0]),
+    LIST_HEAD_INITIALIZER(ready_queues[1]),
+    LIST_HEAD_INITIALIZER(ready_queues[2])
 };
 
 // Спинлоки для каждой приоритетной очереди
@@ -207,97 +199,97 @@ static struct spinlock queue_locks[PRIORITY_COUNT];
 
 // Квант (временной срез) в микросекундах для каждого приоритета
 static const uint64_t priority_quantum[PRIORITY_COUNT] = {
-  10000,  // Высокий приоритет: 10мс
-  20000,  // Нормальный приоритет: 20мс
-  30000   // Низкий приоритет: 30мс
+    10000,  // Высокий приоритет: 10мс
+    20000,  // Нормальный приоритет: 20мс
+    30000   // Низкий приоритет: 30мс
 };
 
 /**
  * Поток epoll, который отслеживает файловые дескрипторы на I/O события.
  */
 int epoll_loop(void* argument) {
-    (void)argument;
-    
-    struct epoll_event events[MAX_EPOLL_EVENTS];
-    
-    while (1) {
-        // Print statistics periodically
-        sched_print_statistics();
- 
-        int nfds = epoll_wait(epoll_fd, events, MAX_EPOLL_EVENTS, MAX_EPOLL_TIMEOUT);
-        if (nfds == -1) {
-            if (errno == EINTR) {
-                continue;
-            }
-            perror("epoll_wait");
-            break;
-        }
-        
-        for (int i = 0; i < nfds; i++) {
-            struct task* task = (struct task*)events[i].data.ptr;
-            if (task) {
-                spinlock_lock(&task->lock);
-                if (task->state == UTHREAD_BLOCKED) {
-                    // Remove from blocked list
-                    spinlock_lock(&blocked_lock);
-                    LIST_REMOVE(task, entries);
-                    spinlock_unlock(&blocked_lock);
-                    
-                    // Boost priority for I/O ready tasks
-                    if (task->priority > PRIORITY_HIGH) {
-                        task->priority--;
-                    }
-                    
-                    // Mark as runnable and add to priority queue
-                    task->state = UTHREAD_RUNNABLE;
-                    sched_enqueue_task(task);
-                }
-                spinlock_unlock(&task->lock);
-            }
-        }
+  (void)argument;
+
+  struct epoll_event events[MAX_EPOLL_EVENTS];
+
+  while (1) {
+    // Print statistics periodically
+    sched_print_statistics();
+
+    int nfds = epoll_wait(epoll_fd, events, MAX_EPOLL_EVENTS, MAX_EPOLL_TIMEOUT);
+    if (nfds == -1) {
+      if (errno == EINTR) {
+        continue;
+      }
+      perror("epoll_wait");
+      break;
     }
-    
-    return 0;
+
+    for (int i = 0; i < nfds; i++) {
+      struct task* task = (struct task*)events[i].data.ptr;
+      if (task) {
+        spinlock_lock(&task->lock);
+        if (task->state == UTHREAD_BLOCKED) {
+          // Remove from blocked list
+          spinlock_lock(&blocked_lock);
+          LIST_REMOVE(task, entries);
+          spinlock_unlock(&blocked_lock);
+
+          // Boost priority for I/O ready tasks
+          if (task->priority > PRIORITY_HIGH) {
+            task->priority--;
+          }
+
+          // Mark as runnable and add to priority queue
+          task->state = UTHREAD_RUNNABLE;
+          sched_enqueue_task(task);
+        }
+        spinlock_unlock(&task->lock);
+      }
+    }
+  }
+
+  return 0;
 }
 
 /**
  * Получить текущее время в наносекундах.
  */
 uint64_t get_time_ns() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
 /**
  * Преобразовать время в `struct timespec` в наносекунды.
  */
 uint64_t convert_time_to_ns(struct timespec* time) {
-    return (uint64_t)time->tv_sec * 1000000000ULL + (uint64_t)time->tv_nsec;
+  return (uint64_t)time->tv_sec * 1000000000ULL + (uint64_t)time->tv_nsec;
 }
 
 /**
  * Обновить параметры времени для задачи.
  */
 void update_task_time(struct task* task) {
-    uint64_t now = get_time_ns();
-    uint64_t delta = now - convert_time_to_ns(&task->last_state_change);
+  uint64_t now = get_time_ns();
+  uint64_t delta = now - convert_time_to_ns(&task->last_state_change);
 
-    switch (task->state) {
-        case UTHREAD_RUNNING:
-            task->time_running += delta;
-            break;
-        case UTHREAD_RUNNABLE:
-            task->time_runnable += delta;
-            break;
-        case UTHREAD_BLOCKED:
-            task->time_blocked += delta;
-            break;
-        default:
-            break;
-    }
+  switch (task->state) {
+    case UTHREAD_RUNNING:
+      task->time_running += delta;
+      break;
+    case UTHREAD_RUNNABLE:
+      task->time_runnable += delta;
+      break;
+    case UTHREAD_BLOCKED:
+      task->time_blocked += delta;
+      break;
+    default:
+      break;
+  }
 
-    clock_gettime(CLOCK_MONOTONIC, &task->last_state_change);
+  clock_gettime(CLOCK_MONOTONIC, &task->last_state_change);
 }
 
 /**
@@ -352,7 +344,7 @@ void sched_init() {
   if (stats_fd == -1) {
     perror("Failed to open statistics file");
   }
-  
+
   last_stats_time = get_time_ns();
 }
 
@@ -375,13 +367,13 @@ void sched_switch_to_scheduler(struct task* task) {
 void sched_switch_to(struct worker* worker, struct task* task) {
   update_task_time(task);
   assert(task->thread != &worker->sched_thread);
-  
+
   task->state = UTHREAD_RUNNING;
   task->quantum_start = get_time_ns();
-  
+
   task->worker = worker;
   worker->running_task = task;
-  
+
   struct uthread* sched = &worker->sched_thread;
   uthread_switch(sched, task->thread);
 }
@@ -431,14 +423,12 @@ int sched_loop(void* argument) {
 
 struct task* sched_acquire_next() {
   struct task* task = NULL;
-  
+
   // Try to get a task from each priority queue, starting with highest priority
-  for (enum task_priority priority = PRIORITY_HIGH; 
-       priority < PRIORITY_COUNT && task == NULL; 
+  for (enum task_priority priority = PRIORITY_HIGH; priority < PRIORITY_COUNT && task == NULL;
        priority++) {
-    
     spinlock_lock(&queue_locks[priority]);
-    
+
     if (!LIST_EMPTY(&ready_queues[priority])) {
       task = LIST_FIRST(&ready_queues[priority]);
       if (spinlock_try_lock(&task->lock)) {
@@ -450,35 +440,35 @@ struct task* sched_acquire_next() {
         spinlock_unlock(&task->lock);
       }
     }
-    
+
     spinlock_unlock(&queue_locks[priority]);
   }
-  
+
   // If no tasks in priority queues, try the old round-robin approach as fallback
   for (size_t attempt = 0; attempt < SCHED_NEXT_MAX_ATTEMPTS; ++attempt) {
     spinlock_lock(&tasks_lock);  // Protect next_task_index
-    
+
     for (size_t i = 0; i < SCHED_THREADS_LIMIT; ++i) {
       struct task* task = &tasks[next_task_index];
       if (!spinlock_try_lock(&task->lock)) {
         next_task_index = (next_task_index + 1) % SCHED_THREADS_LIMIT;
         continue;
       }
-      
+
       next_task_index = (next_task_index + 1) % SCHED_THREADS_LIMIT;
-      
+
       if (task->thread != NULL && task->state == UTHREAD_RUNNABLE) {
         spinlock_unlock(&tasks_lock);
         return task;
       }
-      
+
       spinlock_unlock(&task->lock);
     }
-    
+
     spinlock_unlock(&tasks_lock);
     SPINLOOP(2 * attempt);
   }
-  
+
   return NULL;
 }
 
@@ -495,13 +485,13 @@ void sched_release(struct task* task) {
     uint64_t now = get_time_ns();
     uint64_t elapsed = now - task->quantum_start;
     uint64_t quantum = priority_quantum[task->priority];
-    
+
     if (elapsed > quantum) {
       // Task has used its quantum, adjust priority and preemption count
       task->preemption_count++;
       sched_adjust_priority(task);
     }
-    
+
     // Put task back in runnable state and add to appropriate queue
     task->state = UTHREAD_RUNNABLE;
     sched_enqueue_task(task);
@@ -511,7 +501,7 @@ void sched_release(struct task* task) {
     LIST_INSERT_HEAD(&blocked_tasks, task, entries);
     spinlock_unlock(&blocked_lock);
   }
-  
+
   spinlock_unlock(&task->lock);
 }
 
@@ -520,7 +510,7 @@ void sched_release(struct task* task) {
  */
 void sched_unblock(struct task* task) {
   spinlock_lock(&blocked_lock);
-  
+
   if (task->state == UTHREAD_BLOCKED) {
     LIST_REMOVE(task, entries);
     task->state = UTHREAD_RUNNABLE;
@@ -531,7 +521,7 @@ void sched_unblock(struct task* task) {
 
     sched_enqueue_task(task);
   }
-  
+
   spinlock_unlock(&blocked_lock);
 }
 
@@ -600,7 +590,7 @@ task_t sched_submit(void (*entry)(), void* argument) {
     }
     SPINLOOP(2 * attempt);
   }
-  
+
   assert(false && "Can't create a task");
 }
 
@@ -625,18 +615,25 @@ void sched_wait() {
 
 char* print_state(int state) {
   switch (state) {
-    case UTHREAD_RUNNABLE: return "RUNNABLE";
-    case UTHREAD_RUNNING: return "RUNNING";
-    case UTHREAD_FINISHED: return "FINISHED";
-    case UTHREAD_ZOMBIE: return "ZOMBIE";
-    case UTHREAD_BLOCKED: return "BLOCKED";
-    default: return "UNKNOWN";
+    case UTHREAD_RUNNABLE:
+      return "RUNNABLE";
+    case UTHREAD_RUNNING:
+      return "RUNNING";
+    case UTHREAD_FINISHED:
+      return "FINISHED";
+    case UTHREAD_ZOMBIE:
+      return "ZOMBIE";
+    case UTHREAD_BLOCKED:
+      return "BLOCKED";
+    default:
+      return "UNKNOWN";
   }
 }
 
 // Modified statistics function to use non-blocking I/O
 void sched_print_statistics() {
-  if (stats_fd == -1) return;
+  if (stats_fd == -1)
+    return;
 
   uint64_t now = get_time_ns();
 
@@ -669,30 +666,47 @@ void sched_print_statistics() {
 
   // Format statistics into a buffer
   char buffer[4096];
-  int len = snprintf(buffer, sizeof(buffer),
-    "\n--- Scheduler Statistics at %lu ns ---\n"
-    "Tasks executed: %zu\n"
-    "Total time RUNNING: %lu ns\n"
-    "Total time RUNNABLE: %lu ns\n"
-    "Total time BLOCKED: %lu ns\n"
-    "Steps done: %zu\n",
-    now, tasks_count, total_time_running, total_time_runnable, 
-    total_time_blocked, steps_count);
+  int len = snprintf(
+      buffer,
+      sizeof(buffer),
+      "\n--- Scheduler Statistics at %lu ns ---\n"
+      "Tasks executed: %zu\n"
+      "Total time RUNNING: %lu ns\n"
+      "Total time RUNNABLE: %lu ns\n"
+      "Total time BLOCKED: %lu ns\n"
+      "Steps done: %zu\n",
+      now,
+      tasks_count,
+      total_time_running,
+      total_time_runnable,
+      total_time_blocked,
+      steps_count
+  );
 
   // Add worker statistics
   for (size_t i = 0; i < SCHED_WORKERS_COUNT && len < (int)sizeof(buffer) - 100; ++i) {
     struct worker* worker = &workers[i];
-    len += snprintf(buffer + len, sizeof(buffer) - len,
-      "Worker %zu (ID: %zu): Steps: %zu, Finished: %zu, State: %s\n",
-      i, kthread_ids[i], worker->statistics.steps, worker->statistics.finished, print_state(worker->running_task->state));
+    len += snprintf(
+        buffer + len,
+        sizeof(buffer) - len,
+        "Worker %zu (ID: %zu): Steps: %zu, Finished: %zu, State: %s\n",
+        i,
+        kthread_ids[i],
+        worker->statistics.steps,
+        worker->statistics.finished,
+        print_state(worker->running_task->state)
+    );
   }
 
   // Add priority queue statistics
-  len += snprintf(buffer + len, sizeof(buffer) - len, 
-    "Priority queue sizes: High: %d, Normal: %d, Low: %d\n",
-    LIST_EMPTY(&ready_queues[PRIORITY_HIGH]) ? 0 : 1,
-    LIST_EMPTY(&ready_queues[PRIORITY_NORMAL]) ? 0 : 1,
-    LIST_EMPTY(&ready_queues[PRIORITY_LOW]) ? 0 : 1);
+  len += snprintf(
+      buffer + len,
+      sizeof(buffer) - len,
+      "Priority queue sizes: High: %d, Normal: %d, Low: %d\n",
+      LIST_EMPTY(&ready_queues[PRIORITY_HIGH]) ? 0 : 1,
+      LIST_EMPTY(&ready_queues[PRIORITY_NORMAL]) ? 0 : 1,
+      LIST_EMPTY(&ready_queues[PRIORITY_LOW]) ? 0 : 1
+  );
 
   // Write to file using non-blocking I/O
   write(stats_fd, buffer, len);
@@ -720,45 +734,45 @@ void sched_destroy() {
 }
 
 void sched_block(struct task* task) {
-    update_task_time(task);
-    
-    spinlock_lock(&blocked_lock);
-    task->state = UTHREAD_BLOCKED;
-    LIST_INSERT_HEAD(&blocked_tasks, task, entries);
-    spinlock_unlock(&blocked_lock);
+  update_task_time(task);
 
-    task_yield(task);
+  spinlock_lock(&blocked_lock);
+  task->state = UTHREAD_BLOCKED;
+  LIST_INSERT_HEAD(&blocked_tasks, task, entries);
+  spinlock_unlock(&blocked_lock);
+
+  task_yield(task);
 }
 
 /**
  * Блокирует задачу на ожидание событий на файловом дескрипторе.
  */
 void sched_block_on_fd(struct task* task, int fd, uint32_t events) {
-    update_task_time(task);
-    
-    struct epoll_event ev;
-    ev.events = events;
-    ev.data.ptr = task;
+  update_task_time(task);
 
-    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) == -1) {
-        perror("epoll_ctl: add");
-        return;
-    }
+  struct epoll_event ev;
+  ev.events = events;
+  ev.data.ptr = task;
 
-    spinlock_lock(&blocked_lock);
-    task->state = UTHREAD_BLOCKED;
-    LIST_INSERT_HEAD(&blocked_tasks, task, entries);
-    spinlock_unlock(&blocked_lock);
-    sched_adjust_priority(task);
-    task_yield(task);
+  if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) == -1) {
+    perror("epoll_ctl: add");
+    return;
+  }
 
-    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+  spinlock_lock(&blocked_lock);
+  task->state = UTHREAD_BLOCKED;
+  LIST_INSERT_HEAD(&blocked_tasks, task, entries);
+  spinlock_unlock(&blocked_lock);
+  sched_adjust_priority(task);
+  task_yield(task);
+
+  epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
 }
 
 // Add task to the appropriate priority queue
 void sched_enqueue_task(struct task* task) {
   enum task_priority priority = task->priority;
-  
+
   spinlock_lock(&queue_locks[priority]);
   LIST_INSERT_HEAD(&ready_queues[priority], task, entries);
   spinlock_unlock(&queue_locks[priority]);
@@ -767,7 +781,7 @@ void sched_enqueue_task(struct task* task) {
 // Remove task from its priority queue
 void sched_dequeue_task(struct task* task) {
   enum task_priority priority = task->priority;
-  
+
   spinlock_lock(&queue_locks[priority]);
   LIST_REMOVE(task, entries);
   spinlock_unlock(&queue_locks[priority]);
@@ -782,7 +796,7 @@ void sched_adjust_priority(struct task* task) {
     }
     task->preemption_count = 0;
   }
-  
+
   // If task has yielded or blocked voluntarily, increase its priority
   if (task->state == UTHREAD_BLOCKED) {
     if (task->priority > PRIORITY_HIGH) {
