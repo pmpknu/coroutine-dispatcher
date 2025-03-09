@@ -3,7 +3,6 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <sched.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -25,6 +24,14 @@
 #define CLOCK_MONOTONIC 1
 #endif
 
+enum scheduler_constants {
+  NS_PER_SEC = 1000000000ULL,
+  DEFAULT_BUFFER_SIZE = 4096,
+  WORKER_STATS_MARGIN = 100,
+  FILE_PERMISSIONS = 0644,
+  PREEMPTION_THRESHOLD = 5
+};
+
 enum {
   /**
    * Максимальное количество файберов, которое может
@@ -35,25 +42,25 @@ enum {
   /**
    * Количество рабочих потоков для исполнения файберов.
    */
-  SCHED_WORKERS_COUNT = (size_t)(8),
+  SCHED_WORKERS_COUNT = 8,
 
   /**
    * Обеспечивает костыль для ретрая операций
    * `submit` и `acquire_next` при высокой
    * конкуренции на спинлоках файберов.
    */
-  SCHED_NEXT_MAX_ATTEMPTS = (size_t)(16),
+  SCHED_NEXT_MAX_ATTEMPTS = 16,
 
   /**
    * Максимальное количество событий, которые могут быть
    * обработаны в одном цикле epoll.
    */
-  MAX_EPOLL_EVENTS = (size_t)(64),
+  MAX_EPOLL_EVENTS = 64,
 
   /**
    * Максимальное время ожидания событий в миллисекундах.
    */
-  MAX_EPOLL_TIMEOUT = (int)(1000),
+  MAX_EPOLL_TIMEOUT = 1000,
 };
 
 // Define task priority enum before using it
@@ -76,11 +83,11 @@ void sched_enqueue_task(struct task* task);
 void sched_dequeue_task(struct task* task);
 void sched_adjust_priority(struct task* task);
 
-// Add these global variables for statistics
+// Fix variable naming to follow consistent style
 static int stats_fd = -1;
-static const char* STATS_FILENAME = "log/scheduler_stats.log";
+static const char* stats_filename = "log/scheduler_stats.log";
 static uint64_t last_stats_time = 0;
-static const uint64_t STATS_INTERVAL_NS = 1000000000ULL;  // 1 seconds
+static const uint64_t stats_interval_ns = NS_PER_SEC;  // 1 second
 
 /**
  * Задача, выполняющаяся на планировщике.
@@ -256,16 +263,17 @@ int epoll_loop(void* argument) {
  * Получить текущее время в наносекундах.
  */
 uint64_t get_time_ns() {
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+  struct timespec time_spec;
+  int result = clock_gettime(CLOCK_MONOTONIC, &time_spec);
+  (void)result;  // Silence unused result warning
+  return ((uint64_t)time_spec.tv_sec * NS_PER_SEC) + (uint64_t)time_spec.tv_nsec;
 }
 
 /**
  * Преобразовать время в `struct timespec` в наносекунды.
  */
 uint64_t convert_time_to_ns(struct timespec* time) {
-  return (uint64_t)time->tv_sec * 1000000000ULL + (uint64_t)time->tv_nsec;
+  return ((uint64_t)time->tv_sec * NS_PER_SEC) + (uint64_t)time->tv_nsec;
 }
 
 /**
@@ -289,7 +297,8 @@ void update_task_time(struct task* task) {
       break;
   }
 
-  clock_gettime(CLOCK_MONOTONIC, &task->last_state_change);
+  int result = clock_gettime(CLOCK_MONOTONIC, &task->last_state_change);
+  (void)result;  // Silence unused result warning
 }
 
 /**
@@ -340,7 +349,7 @@ void sched_init() {
   }
 
   // Open statistics file with non-blocking flags
-  stats_fd = open(STATS_FILENAME, O_WRONLY | O_CREAT | O_APPEND | O_NONBLOCK, 0644);
+  stats_fd = open(stats_filename, O_WRONLY | O_CREAT | O_APPEND | O_NONBLOCK, FILE_PERMISSIONS);
   if (stats_fd == -1) {
     perror("Failed to open statistics file");
   }
@@ -632,13 +641,13 @@ char* print_state(int state) {
 
 // Modified statistics function to use non-blocking I/O
 void sched_print_statistics() {
-  if (stats_fd == -1)
+  if (stats_fd == -1) {
     return;
+  }
 
   uint64_t now = get_time_ns();
 
-  // Only print statistics periodically
-  if (now - last_stats_time < STATS_INTERVAL_NS) {
+  if (now - last_stats_time < stats_interval_ns) {
     return;
   }
 
@@ -665,7 +674,7 @@ void sched_print_statistics() {
   }
 
   // Format statistics into a buffer
-  char buffer[4096];
+  char buffer[DEFAULT_BUFFER_SIZE];
   int len = snprintf(
       buffer,
       sizeof(buffer),
@@ -684,7 +693,8 @@ void sched_print_statistics() {
   );
 
   // Add worker statistics
-  for (size_t i = 0; i < SCHED_WORKERS_COUNT && len < (int)sizeof(buffer) - 100; ++i) {
+  for (size_t i = 0; i < SCHED_WORKERS_COUNT && len < (int)sizeof(buffer) - WORKER_STATS_MARGIN;
+       ++i) {
     struct worker* worker = &workers[i];
     if (worker->running_task != NULL) {
       len += snprintf(
@@ -759,14 +769,14 @@ void sched_block(struct task* task) {
 /**
  * Блокирует задачу на ожидание событий на файловом дескрипторе.
  */
-void sched_block_on_fd(struct task* task, int fd, uint32_t events) {
+void sched_block_on_fd(struct task* task, int file_descriptor, uint32_t events) {
   update_task_time(task);
 
-  struct epoll_event ev;
-  ev.events = events;
-  ev.data.ptr = task;
+  struct epoll_event event;
+  event.events = events;
+  event.data.ptr = task;
 
-  if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) == -1) {
+  if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, file_descriptor, &event) == -1) {
     perror("epoll_ctl: add");
     return;
   }
@@ -778,7 +788,7 @@ void sched_block_on_fd(struct task* task, int fd, uint32_t events) {
   sched_adjust_priority(task);
   task_yield(task);
 
-  epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+  epoll_ctl(epoll_fd, EPOLL_CTL_DEL, file_descriptor, NULL);
 }
 
 // Add task to the appropriate priority queue
@@ -802,7 +812,7 @@ void sched_dequeue_task(struct task* task) {
 // Adjust task priority based on behavior
 void sched_adjust_priority(struct task* task) {
   // If task has been preempted many times, lower its priority
-  if (task->preemption_count > 5) {
+  if (task->preemption_count > PREEMPTION_THRESHOLD) {
     if (task->priority < PRIORITY_LOW) {
       task->priority++;
     }
