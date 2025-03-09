@@ -1,5 +1,8 @@
 {
   "C_Cpp.intelliSenseEngine": "default",
   "clangd.path": "clangd-18",
-  "C_Cpp.default.compilerPath": "/usr/bin/gcc"
+  "C_Cpp.default.compilerPath": "/usr/bin/gcc",
+  "files.associations": {
+    "schedy.h": "c"
+  }
 }
