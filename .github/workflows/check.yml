@@ -35,20 +35,27 @@ jobs:
           sudo apt install clang clang-format clang-tidy
           sudo apt install bear
 
-      - name: Create log directory
-        run: mkdir -p log
-
       - name: Build
-        run: make compile
+        run: |
+          if [[ -z "${{ matrix.sanitizers }}" ]]; then
+              SAN=""
+          else
+              SAN="-fsanitize=${{ matrix.sanitizers }}"
+          fi
+          bear -- make compile \
+            COMPILER=${{ matrix.compiler }} \
+            OPTIMIZATION_LEVEL=${{ matrix.optimization_level }}\
+            SANITIZERS="$SAN"
 
       - name: Test
-        run: make
+        run: |
+          for i in {1..8}; do
+            echo "|- Running #$i..."
+            ./build/bin/app
+          done
 
       - name: Check Format
         run: make check-format
 
       - name: Check Style
         run: make check-style
-
-      - name: Run precommit
-        run: ./ci/precommit.bash
